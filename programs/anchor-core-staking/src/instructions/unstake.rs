@@ -1,14 +1,17 @@
-use anchor_lang::prelude::*;
-use anchor_spl::{associated_token::AssociatedToken, token_interface::{Mint, TokenAccount, TokenInterface, mint_to_checked, MintToChecked}};
-use mpl_core::{
-    ID as MPL_CORE_ID,
-    accounts::{BaseAssetV1, BaseCollectionV1},
-    types::{UpdateAuthority, Attribute, Attributes, Plugin, PluginType, FreezeDelegate},
-    instructions::{UpdatePluginV1CpiBuilder},
-    fetch_plugin,
-};
-use crate::Config;
 use crate::error::ErrorCode;
+use crate::Config;
+use anchor_lang::prelude::*;
+use anchor_spl::{
+    associated_token::AssociatedToken,
+    token_interface::{mint_to_checked, Mint, MintToChecked, TokenAccount, TokenInterface},
+};
+use mpl_core::{
+    accounts::{BaseAssetV1, BaseCollectionV1},
+    fetch_plugin,
+    instructions::UpdatePluginV1CpiBuilder,
+    types::{Attribute, Attributes, FreezeDelegate, Plugin, PluginType, UpdateAuthority},
+    ID as MPL_CORE_ID,
+};
 
 const SECONDS_PER_DAY: i64 = 86400;
 
@@ -59,7 +62,6 @@ pub struct Unstake<'info> {
     pub mpl_core_program: UncheckedAccount<'info>,
 }
 pub fn handler(ctx: Context<Unstake>) -> Result<()> {
-
     // We start by fetching the existing attributes
     let attributes_fetched: Option<Attributes> = fetch_plugin::<BaseAssetV1, Attributes>(
         &ctx.accounts.asset.to_account_info(),
@@ -80,23 +82,67 @@ pub fn handler(ctx: Context<Unstake>) -> Result<()> {
     let current_timestamp = Clock::get()?.unix_timestamp;
     let mut staked_timestamp: i64 = 0;
     let mut staked_time: i64 = 0;
+    let mut last_claimed_at: i64 = 0;
 
     for attribute in &attributes.attribute_list {
-        if attribute.key == "staked" {
-            require!(attribute.value == "true", ErrorCode::AssetNotStaked);
-        }
-        else if attribute.key == "staked_at" {
-            staked_timestamp = staked_timestamp.checked_add(attribute.value.parse::<i64>().map_err(|_| ErrorCode::InvalidTimestamp)?).ok_or(ErrorCode::InvalidTimestamp)?;
-            // Calculate the time (in seconds) since the asset was staked
-            staked_time = current_timestamp.checked_sub(staked_timestamp).ok_or(ErrorCode::InvalidTimestamp)?;
-            // Staked time in days
-            staked_time = staked_time.checked_div(SECONDS_PER_DAY).ok_or(ErrorCode::InvalidTimestamp)?;
-            require!(staked_time >= ctx.accounts.config.freeze_period as i64, ErrorCode::FreezePeriodNotElapsed);
-        }
-        else {
-            attributes_list.push(attribute.clone());
+        match attribute.key.as_str() {
+            "staked" => {
+                require!(attribute.value == "true", ErrorCode::AssetNotStaked);
+            }
+            "staked_at" => {
+                staked_timestamp = staked_timestamp
+                    .checked_add(
+                        attribute
+                            .value
+                            .parse::<i64>()
+                            .map_err(|_| ErrorCode::InvalidTimestamp)?,
+                    )
+                    .ok_or(ErrorCode::InvalidTimestamp)?;
+            }
+            "last_claimed_at" => {
+                last_claimed_at = last_claimed_at
+                    .checked_add(
+                        attribute
+                            .value
+                            .parse::<i64>()
+                            .map_err(|_| ErrorCode::InvalidTimestamp)?,
+                    )
+                    .ok_or(ErrorCode::InvalidTimestamp)?;
+            }
+            _ => {
+                attributes_list.push(attribute.clone());
+            }
         }
     }
+
+    require!(staked_timestamp > 0, ErrorCode::InvalidTimestamp);
+
+    staked_time = current_timestamp
+        .checked_sub(staked_timestamp)
+        .ok_or(ErrorCode::InvalidTimestamp)?;
+    // Staked time in days
+    staked_time = staked_time
+        .checked_div(SECONDS_PER_DAY)
+        .ok_or(ErrorCode::InvalidTimestamp)?;
+
+    require!(
+        staked_time >= ctx.accounts.config.freeze_period as i64,
+        ErrorCode::FreezePeriodNotElapsed
+    );
+
+    if last_claimed_at == 0 {
+        last_claimed_at = staked_timestamp;
+    };
+
+    staked_time = current_timestamp
+        .checked_sub(last_claimed_at)
+        .ok_or(ErrorCode::InvalidTimestamp)?;
+    // Staked time in days
+    staked_time = staked_time
+        .checked_div(SECONDS_PER_DAY)
+        .ok_or(ErrorCode::InvalidTimestamp)?;
+
+    require!(staked_time > 0, ErrorCode::InvalidTimestamp);
 
     // Prepare signing seeds for the update authority
     let collection_key = ctx.accounts.collection.key();
@@ -117,30 +163,36 @@ pub fn handler(ctx: Context<Unstake>) -> Result<()> {
         key: "staked_at".to_string(),
         value: "0".to_string(),
     });
+    attributes_list.push(Attribute {
+        key: "last_claimed_at".to_string(),
+        value: "0".to_string(),
+    });
 
     UpdatePluginV1CpiBuilder::new(&ctx.accounts.mpl_core_program.to_account_info())
-    .asset(&ctx.accounts.asset.to_account_info())
-    .collection(Some(&ctx.accounts.collection.to_account_info()))
-    .payer(&ctx.accounts.owner.to_account_info())
-    .authority(Some(&ctx.accounts.update_authority.to_account_info()))
-    .system_program(&ctx.accounts.system_program.to_account_info())
-    .plugin(Plugin::Attributes(Attributes { attribute_list: attributes_list }))
-    .invoke_signed(&[signer_seeds])?;
+        .asset(&ctx.accounts.asset.to_account_info())
+        .collection(Some(&ctx.accounts.collection.to_account_info()))
+        .payer(&ctx.accounts.owner.to_account_info())
+        .authority(Some(&ctx.accounts.update_authority.to_account_info()))
+        .system_program(&ctx.accounts.system_program.to_account_info())
+        .plugin(Plugin::Attributes(Attributes {
+            attribute_list: attributes_list,
+        }))
+        .invoke_signed(&[signer_seeds])?;
 
     // And we Thaw the asset (update the FreezeDelegate Plugin to false)
     UpdatePluginV1CpiBuilder::new(&ctx.accounts.mpl_core_program.to_account_info())
-    .asset(&ctx.accounts.asset.to_account_info())
-    .collection(Some(&ctx.accounts.collection.to_account_info()))
-    .payer(&ctx.accounts.owner.to_account_info())
-    .authority(Some(&ctx.accounts.update_authority.to_account_info()))
-    .system_program(&ctx.accounts.system_program.to_account_info())
-    .plugin(Plugin::FreezeDelegate(FreezeDelegate { frozen: false }))
-    .invoke_signed(&[signer_seeds])?;
+        .asset(&ctx.accounts.asset.to_account_info())
+        .collection(Some(&ctx.accounts.collection.to_account_info()))
+        .payer(&ctx.accounts.owner.to_account_info())
+        .authority(Some(&ctx.accounts.update_authority.to_account_info()))
+        .system_program(&ctx.accounts.system_program.to_account_info())
+        .plugin(Plugin::FreezeDelegate(FreezeDelegate { frozen: false }))
+        .invoke_signed(&[signer_seeds])?;
 
     // Finally, we want to mint rewards to the user
 
     // Calculate the amount
-    let amount =(staked_time as u64)
+    let amount = (staked_time as u64)
         .checked_mul(ctx.accounts.config.rewards_bps as u64)
         .ok_or(ErrorCode::InvalidRewardsBps)?
         .checked_mul(10u64.pow(ctx.accounts.rewards_mint.decimals as u32))

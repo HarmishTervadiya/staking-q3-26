@@ -37,4 +37,8 @@ pub mod anchor_core_staking {
         unstake::handler(ctx)
     }
 
+    pub fn claim_rewards(ctx: Context<ClaimRewards>) -> Result<()> {
+        claim_rewards::handler(ctx)
+    }
+
 }
