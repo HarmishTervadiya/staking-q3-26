@@ -17,11 +17,19 @@ declare_id!("FkP21JjeMc9gcq9iBQBHfLocaLsxCYGLg4jgwin6pBwG");
 pub mod anchor_core_staking {
     use super::*;
 
-    pub fn initialize(ctx: Context<Initialize>, rewards_bps: u16, freeze_period: u16) -> Result<()> {
+    pub fn initialize(
+        ctx: Context<Initialize>,
+        rewards_bps: u16,
+        freeze_period: u16,
+    ) -> Result<()> {
         initialize::handler(ctx, rewards_bps, freeze_period)
     }
 
-    pub fn create_collection(ctx: Context<CreateCollection>, name: String, uri: String) -> Result<()> {
+    pub fn create_collection(
+        ctx: Context<CreateCollection>,
+        name: String,
+        uri: String,
+    ) -> Result<()> {
         create_collection::handler(ctx, name, uri)
     }
 
@@ -41,4 +49,7 @@ pub mod anchor_core_staking {
         claim_rewards::handler(ctx)
     }
 
+    pub fn burn_staked_nft(ctx: Context<BurnStaked>) -> Result<()> {
+        burn_staked_nft::handler(ctx)
+    }
 }
